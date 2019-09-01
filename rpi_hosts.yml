@@ -1,0 +1,13 @@
+---
+all:
+  hosts:
+    <ip address>:
+      new_hostname: <hostname>
+      new_root_name: <root drive name>
+  vars:
+    ansible_connection: ssh
+    new_ssh_port: <port number>
+    ansible_ssh_user: <username>
+    renamed_user: <username>
+    new_password: <password>
+...

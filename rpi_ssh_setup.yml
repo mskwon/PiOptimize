@@ -1,0 +1,529 @@
+---
+- hosts: all
+  gather_facts: no
+  tasks:
+  # Renaming pi to a different name
+    # First determine user account status
+    - name: Check if user pi exists
+      local_action: shell sshpass -p raspberry ssh pi@{{ inventory_hostname }} "echo exists"
+      register: pi_exists
+      ignore_errors: true
+      changed_when: false 
+    - name: Check if user tempuser exists
+      local_action: shell sshpass -p password ssh tempuser@{{ inventory_hostname }} "echo exists"
+      register: tempuser_exists
+      ignore_errors: true 
+      changed_when: false 
+
+  # Change hostname   
+    - name: Change /etc/hostname
+      become: true
+      become_user: root 
+      copy:
+        content: "{{ new_hostname }}"
+        dest: "/etc/hostname"
+      when: pi_exists.stdout == "exists"
+      vars:
+        ansible_ssh_user: pi
+        ansible_ssh_pass: raspberry
+        ansible_sudo_pass: raspberry
+    - name: Change /etc/hosts
+      become: true
+      become_user: root
+      lineinfile:
+        path: "/etc/hosts"
+        regexp: "^127.0.1.1.*"
+        line: "127.0.1.1	{{ new_hostname }}"
+      when: pi_exists.stdout == "exists"
+      vars:
+        ansible_ssh_user: pi
+        ansible_ssh_pass: raspberry
+        ansible_sudo_pass: raspberry
+
+    # Set up a temporary account to make changes to pi account with
+    - name: Creating a temporary account to rename pi account
+      remote_user: pi
+      become: true
+      become_user: root
+      user:
+        name: tempuser
+        password: "{{ 'password' | password_hash('sha512') }}"
+        groups: sudo
+      when: pi_exists.stdout == "exists" and tempuser_exists.stdout != "exists"
+      vars:
+        ansible_ssh_user: pi 
+        ansible_ssh_pass: raspberry 
+        ansible_sudo_pass: raspberry
+
+    # Rename instances of pi with the new username
+    - name: Get information about /etc/sudoers.d/*
+      remote_user: tempuser
+      become: true 
+      become_user: root
+      find:
+        paths: "/etc/sudoers.d/"
+        patterns: "*"
+      register: sudoers_files
+      when: pi_exists.stdout == "exists"
+      vars:
+        ansible_ssh_user: tempuser
+        ansible_ssh_pass: password
+        ansible_sudo_pass: password
+    - name: Rename all references from pi to {{ renamed_user }}
+      remote_user: tempuser
+      become: true
+      become_user: root
+      replace: 
+        path: "{{ item }}"
+        regexp: "\\bpi\\b"
+        replace: "{{ renamed_user }}"
+      with_items:
+        - /etc/passwd
+        - /etc/group
+        - /etc/shadow
+        - /etc/gshadow
+        - /etc/sudoers
+        - /etc/systemd/system/autologin@.service
+        - "{{ sudoers_files.files | map(attribute='path') | list }}"
+      when: pi_exists.stdout == "exists"
+      vars: 
+        ansible_ssh_user: tempuser
+        ansible_ssh_pass: password
+        ansible_sudo_pass: password
+    
+    # Change /home/pi to /home/{{ renamed_user }}
+    - name: Check if user tempuser exists
+      local_action: shell sshpass -p password ssh tempuser@{{ inventory_hostname }} "echo exists"
+      register: tempuser_exists
+      ignore_errors: true 
+      changed_when: false 
+    - name: Check if /home/pi exists
+      remote_user: tempuser
+      stat:
+        path: /home/pi
+      register: home_pi
+      when: tempuser_exists.stdout == "exists"
+      vars:
+        ansible_ssh_user: tempuser
+        ansible_ssh_pass: password
+    - name: Copy over /home/pi to /home/{{ renamed_user }}
+      remote_user: tempuser
+      become: true 
+      become_user: root
+      copy:
+        src: /home/pi/
+        dest: /home/{{ renamed_user }}
+        owner: "{{ renamed_user }}"
+        mode: "u+rwx"
+        remote_src: yes
+      when: tempuser_exists.stdout == "exists" and home_pi.stat.exists and home_pi.stat.islnk == false
+      vars:
+        ansible_ssh_user: tempuser
+        ansible_ssh_pass: password
+        ansible_sudo_pass: password
+    - name: Delete remaining /home/pi directory
+      remote_user: tempuser
+      become: true 
+      become_user: root 
+      file: 
+        state: absent
+        path: "/home/pi/"
+      when: tempuser_exists.stdout == "exists" and home_pi.stat.exists and home_pi.stat.islnk == false
+      vars: 
+        ansible_ssh_user: tempuser
+        ansible_ssh_pass: password
+        ansible_sudo_pass: password
+    - name: Create a symlink between /home/{{ renamed_user }} and /home/pi
+      remote_user: tempuser 
+      become: true 
+      become_user: root 
+      when: tempuser_exists.stdout == "exists" and home_pi.stat.exists and home_pi.stat.islnk == false
+      file:
+        src: "/home/{{ renamed_user }}"
+        dest: "/home/pi"
+        state: link
+      vars:
+        ansible_ssh_user: tempuser
+        ansible_ssh_pass: password
+        ansible_sudo_pass: password
+
+    # Rename the crontab file for pi if it exists
+    - name: Check if user tempuser exists
+      local_action: shell sshpass -p password ssh tempuser@{{ inventory_hostname }} "echo exists"
+      register: tempuser_exists
+      ignore_errors: true 
+      changed_when: false 
+    - name: Check if a crontab file for pi exists
+      remote_user: tempuser 
+      become: true 
+      become_user: root 
+      stat:
+        path: "/var/spool/cron/crontabs/pi"
+      register: crontab_pi
+      when: tempuser_exists.stdout == "exists"
+      vars:
+        ansible_ssh_user: tempuser 
+        ansible_ssh_pass: password 
+        ansible_sudo_pass: password
+    - name: Copy the crontab file to change ownership from pi to {{ renamed_user }}
+      remote_user: tempuser
+      become: true 
+      become_user: root
+      copy:
+        src: "/var/spool/cron/crontabs/pi"
+        dest: "/var/spool/cron/crontabs/{{ renamed_user }}"
+        remote_src: yes
+      when: tempuser_exists.stdout == "exists" and crontab_pi.stat.exists
+      vars:
+        ansible_ssh_user: tempuser
+        ansible_ssh_pass: password
+        ansible_sudo_pass: password
+    - name: Delete remaining crontab file for pi
+      remote_user: tempuser
+      become: true 
+      become_user: root 
+      file: 
+        state: absent
+        path: "/var/spool/cron/crontabs/pi"
+      when: tempuser_exists.stdout == "exists" and crontab_pi.stat.exists 
+      vars: 
+        ansible_ssh_user: tempuser
+        ansible_ssh_pass: password
+        ansible_sudo_pass: password
+
+    # Rename the mail file for pi if it exists
+    - name: Check if user tempuser exists
+      local_action: shell sshpass -p password ssh tempuser@{{ inventory_hostname }} "echo exists"
+      register: tempuser_exists
+      ignore_errors: true 
+      changed_when: false 
+    - name: Check if a mail file for pi exists
+      remote_user: tempuser 
+      become: true 
+      become_user: root 
+      stat:
+        path: "/var/spool/mail/pi"
+      register: mail_pi
+      when: tempuser_exists.stdout == "exists"
+      vars:
+        ansible_ssh_user: tempuser 
+        ansible_ssh_pass: password 
+        ansible_sudo_pass: password
+    - name: Copy the mail file to change ownership from pi to {{ renamed_user }}
+      remote_user: tempuser
+      become: true 
+      become_user: root
+      copy:
+        src: "/var/spool/mail/pi"
+        dest: "/var/spool/mail/{{ renamed_user }}"
+        remote_src: yes
+      when: tempuser_exists.stdout == "exists" and mail_pi.stat.exists
+      vars:
+        ansible_ssh_user: tempuser
+        ansible_ssh_pass: password
+        ansible_sudo_pass: password
+    - name: Delete remaining mail file for pi
+      remote_user: tempuser
+      become: true 
+      become_user: root 
+      file: 
+        state: absent
+        path: "/var/spool/mail/pi"
+      when: tempuser_exists.stdout == "exists" and mail_pi.stat.exists 
+      vars: 
+        ansible_ssh_user: tempuser
+        ansible_ssh_pass: password
+        ansible_sudo_pass: password
+  
+    # Set password for renamed user 
+    - name: Check if user tempuser exists
+      local_action: shell sshpass -p password ssh tempuser@{{ inventory_hostname }} "echo exists"
+      register: tempuser_exists
+      ignore_errors: true 
+      changed_when: false 
+    - name: Set password for user {{ renamed_user }}
+      remote_user: tempuser
+      become: true 
+      become_user: root 
+      user: 
+        name: "{{ renamed_user }}"
+        password: "{{ new_password | password_hash('sha512') }}"
+        append: yes
+      when: tempuser_exists.stdout == "exists"
+      vars:
+        ansible_ssh_user: tempuser 
+        ansible_ssh_pass: password
+        ansible_sudo_pass: password
+
+    # Remove tempuser account 
+    - name: Check if user tempuser exists
+      local_action: shell sshpass -p password ssh tempuser@{{ inventory_hostname }} "echo exists"
+      register: tempuser_exists
+      ignore_errors: true 
+      changed_when: false 
+    - name: Reset connection to make sure tempuser isn't running any processes
+      become: true 
+      become_user: root
+      reboot:
+      when: tempuser_exists.stdout == "exists"
+      vars:
+        ansible_ssh_user: "{{ renamed_user }}"
+        ansible_ssh_pass: "{{ new_password }}"
+        ansible_sudo_pass: "{{ new_password }}"
+    - name: Remove temporary account 
+      remote_user: "{{ renamed_user }}"
+      become: true
+      become_user: root
+      user:
+        name: tempuser 
+        state: absent
+      when: tempuser_exists.stdout == "exists"
+      vars:
+        ansible_ssh_user: "{{ renamed_user }}"
+        ansible_ssh_pass: "{{ new_password }}"
+        ansible_sudo_pass: "{{ new_password }}"
+
+  # Set up public key for ssh
+    - name: Make .ssh directory
+      remote_user: "{{ renamed_user }}"
+      file:
+        path: "/home/{{ renamed_user }}/.ssh"
+        state: directory
+      vars:
+        ansible_ssh_user: "{{ renamed_user }}"
+        ansible_ssh_pass: "{{ new_password }}"
+    - name: Move over authorized_keys file
+      copy:
+        src: ./authorized_keys
+        dest: "/home/{{ renamed_user }}/.ssh/authorized_keys"
+      vars:
+        ansible_ssh_user: "{{ renamed_user }}"
+        ansible_ssh_pass: "{{ new_password }}"
+  
+  # Set up disk caching 
+    - name: Set up /etc/sysctl.d conf file for disk caching
+      become: true 
+      become_user: root 
+      copy:
+        dest: "/etc/sysctl.d/diskio.conf"
+        content: |
+          vm.vfs_cache_pressure = 50
+          vm.dirty_ratio = 50
+          vm.dirty_background_ratio = 25
+          vm.dirty_expire_centisecs = 360000000
+          vm.dirty_writeback_centisecs = 360000000
+          vm.swappiness = 15
+    - name: Create alternate reboot command with preceding sync
+      become: true
+      become_user: root
+      copy:
+        dest: "/usr/local/sbin/reboot"
+        content: | 
+          #! /bin/bash
+          sync && /sbin/reboot $@
+        mode: "u+rwx"
+    - name: Create alternate shutdown command with preceding sync
+      become: true 
+      become_user: root
+      copy:
+        dest: "/usr/local/sbin/shutdown"
+        content: | 
+          #! /bin/bash
+          sync && /sbin/shutdown $@
+        mode: "u+rwx"
+
+  # Set up LED heartbeat
+    - name: Copy over heartbeat.sh to /root/
+      become: true 
+      become_user: root 
+      copy:
+        dest: "/root/heartbeat.sh"
+        content: |
+          #! /bin/bash
+          echo heartbeat > /sys/class/leds/led0/trigger
+        mode: "u+rwx"
+    - name: Enter in systemd entry for heartbeat
+      become: true 
+      become_user: root 
+      copy:
+        dest: "/etc/systemd/system/heartbeat.service"
+        content: |
+          [Unit]
+          Description=Change LED to heartbeat pattern
+          After=syslog.target
+          After=network.target
+
+          [Service]
+          Type=simple
+          ExecStart=/root/heartbeat.sh
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+    - name: Enable heartbeat.service
+      become: true 
+      become_user: root
+      systemd:
+        name: heartbeat
+        state: started
+        enabled: yes 
+
+  # Set up network disconnection shutdown trigger
+    # - name: Copy over network-monitor.sh
+    #   become: true 
+    #   become_user: root 
+    #   copy:
+    #     dest: "/root/network-monitor.sh"
+    #     content: |
+    #       #! /bin/bash
+
+    #       # Triggers shutdown if network is unavailable for a certain amount of time.
+    #       # Ping gateway until not able to connect, poll multiple times before shutdown since 
+    #       # the network is intermittently spotty.
+    #       counter=0
+    #       while true; do
+    #               sleep 30s
+    #               ping -q -w 1 -c 1 `ip r | grep default | head -n 1 | cut -d ' ' -f 3` > /dev/null && counter=0 || ((counter++))
+    #               if [ $counter -eq 10 ]; then
+    #                       shutdown now
+    #               fi
+    #       done
+    #     mode: "u+rwx"
+    # - name: Enter in systemd entry for shutdown monitor
+    #   become: true 
+    #   become_user: root 
+    #   copy:
+    #     dest: "/etc/systemd/system/shutdown-monitor.service"
+    #     content: |
+    #       [Unit]
+    #       Description=Default Gateway Monitor for Automatic Shutdown
+    #       After=syslog.target
+    #       After=network.target
+
+    #       [Service]
+    #       Type=simple
+    #       ExecStart=/root/network-monitor.sh
+    #       Restart=always
+
+    #       [Install]
+    #       WantedBy=multi-user.target
+    # - name: Enable shutdown-monitor.service
+    #   become: true 
+    #   become_user: root
+    #   systemd:
+    #     name: shutdown-monitor
+    #     state: started
+    #     enabled: yes 
+
+  # Change the SSH port
+    - name: Change SSH port number
+      remote_user: pi
+      become: true
+      become_user: root
+      lineinfile:
+        path: "/etc/ssh/sshd_config"
+        regexp: "^Port "
+        insertafter: "^#Port "
+        line: "Port {{ new_ssh_port }}"
+
+  # Move over root to a f2fs partition on a USB drive if possible
+    - name: Install f2fs-tools
+      become: true 
+      become_user: root 
+      apt:
+        name: f2fs-tools 
+        update_cache: yes 
+    - name: Check for any unpartitioned drives
+      shell: lsblk -o NAME,FSTYPE -dsn | awk '$2 == "" {print $1}' | grep -e sd[a-z] | head -n 1
+      register: device_name
+      changed_when: false 
+    - name: Get PARTUUID of current root
+      shell: cat /proc/cmdline | grep -oP "(?<=PARTUUID=).*" | awk '{print $1}'
+      register: current_root_PARTUUID
+      changed_when: false 
+      when: device_name.stdout != ""
+    - name: Get filesystem type of current root
+      shell: cat /proc/cmdline | grep -oP "(?<=rootfstype=).*" | awk '{print $1}'
+      register: current_root_fs
+      changed_when: false 
+      when: device_name.stdout != ""
+    - name: Make partition
+      become: true 
+      become_user: root
+      shell: "parted -s /dev/{{ device_name.stdout }} mklabel gpt && parted -a opt -s /dev/{{ device_name.stdout }} mkpart primary ext4 0% 100%"
+      when: device_name.stdout != ""
+    - name: Make filesystem on new partition
+      become: true 
+      become_user: root
+      shell: "mkfs.f2fs -f -l {{ new_root_name }} /dev/{{ device_name.stdout }}1"
+      when: device_name.stdout != ""
+    - name: Get new partition PARTUUID
+      become: true 
+      become_user: root 
+      shell: 'blkid /dev/{{ device_name.stdout }}1 | grep -oP "(?<=PARTUUID=\").*" | cut -d \" -f 1'
+      register: new_root_PARTUUID
+      changed_when: false 
+      when: device_name.stdout != ""
+    - name: Change cmdline.txt PARTUUID to new partition
+      become: true 
+      become_user: root
+      replace:
+        path: "/boot/cmdline.txt"
+        regexp: "{{ current_root_PARTUUID.stdout }}"
+        replace: "{{ new_root_PARTUUID.stdout }}"
+      when: device_name.stdout != ""
+    - name: Change cmdline.txt filesystem type to f2fs
+      become: true 
+      become_user: root 
+      replace:
+        path: "/boot/cmdline.txt"
+        regexp: "{{ current_root_fs.stdout }}"
+        replace: "f2fs"
+      when: device_name.stdout != ""
+    - name: Mount new partition on /mnt
+      become: true 
+      become_user: root 
+      shell: "mount /dev/{{ device_name.stdout }}1 /mnt"
+      when: device_name.stdout != ""
+    - name: Synchronize between root and /mnt
+      become: true 
+      become_user: root 
+      synchronize:
+        src: /
+        dest: /mnt/
+        rsync_opts:
+          - "-x"
+      delegate_to: "{{ inventory_hostname }}"
+      when: device_name.stdout != ""
+    - name: Change new fstab to point to new partition
+      become: true 
+      become_user: root 
+      replace:
+        path: "/mnt/etc/fstab"
+        regexp: "{{ current_root_PARTUUID.stdout }}"
+        replace: "{{ new_root_PARTUUID.stdout }}"
+      when: device_name.stdout != ""
+    - name: Change new fstab to indicate the correct filesystem type
+      become: true 
+      become_user: root 
+      replace:
+        path: "/mnt/etc/fstab"
+        regexp: "{{ current_root_fs.stdout }}"
+        replace: "f2fs"
+      when: device_name.stdout != ""
+    - name: Change new fstab options to turn off f2fs background garbage collection
+      become: true 
+      become_user: root 
+      replace:
+        path: "/mnt/etc/fstab"
+        regexp: "\\bdefaults,noatime\\b"
+        replace: "defaults,noatime,background_gc=off"
+      when: device_name.stdout != ""
+
+  # Finally, reboot
+    - name: Reboot 
+      become: true 
+      become_user: root 
+      reboot:     
+      when: device_name.stdout != ""
+...
