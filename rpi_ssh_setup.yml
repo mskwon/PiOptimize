@@ -2,6 +2,20 @@
 - hosts: all
   gather_facts: no
   tasks:
+  # Update kernel
+    - name: Upgrade all packages
+      become: true 
+      become_user: root 
+      shell: apt-get dist-upgrade -y
+      vars:
+        ansible_ssh_user: pi
+        ansible_ssh_pass: raspberry
+        ansible_sudo_pass: raspberry
+    - name: Reboot 
+      become: true 
+      become_user: root 
+      reboot: 
+      
   # Renaming pi to a different name
     # First determine user account status
     - name: Check if user pi exists
