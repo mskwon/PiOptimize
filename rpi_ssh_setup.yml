@@ -15,7 +15,11 @@
       become: true 
       become_user: root 
       reboot: 
-
+      vars:
+        ansible_ssh_user: pi
+        ansible_ssh_pass: raspberry
+        ansible_sudo_pass: raspberry
+        
   # Renaming pi to a different name
     # First determine user account status
     - name: Check if user pi exists
